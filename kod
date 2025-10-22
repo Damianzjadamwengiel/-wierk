@@ -1,24 +1,3 @@
-"""
-Tree Tycoon — pełny plik z GUI (Tkinter).
-
-Naprawa:
-- Dodano brakującą metodę on_closing(), aby nie występował błąd AttributeError podczas ustawiania master.protocol.
-- on_closing pyta o zapis (modalnie), zapisuje jeśli użytkownik potwierdzi, potem zamyka aplikację.
-
-Plik zawiera pełną wersję gry z mechanikami:
-- drewno / drzewa / logs
-- sprzedaż / spalanie / masowa sprzedaż
-- podatki dynamiczne
-- pożyczki (23%)
-- pożary, inspekcje policji (konfiskata drzew)
-- pracownicy (produkcja drewna, pensje)
-- rynek z fluktuacją cen
-- ubezpieczenie przeciwpożarowe
-- historia zdarzeń, eksport/import, backupy
-- przywracanie backupów i reset do domyślnych
-- mini-gry z etykietą "Zakład"
-- bezpieczny loader zapisu (nie zamyka aplikacji przy wyborze Nie)
-"""
 
 import tkinter as tk
 from tkinter import messagebox, Toplevel, Canvas, filedialog, simpledialog
