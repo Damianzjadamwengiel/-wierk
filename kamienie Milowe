@@ -1,17 +1,17 @@
-1. Utworzenie struktury projektu świerk
+1. Utworzenie struktury projektu Wycinanie Lasów Państwowych
 
     Inicjalizacja repozytorium
     Dodanie plików README oraz podstawowej dokumentacji
 
-2.Implementacja podstawowej funkcjonalności świerk#
+2. dodanie podstawowej funkcjonalności oraz ich sprawdzenie
 
-    Dodanie głównych plików kodu
-    Utworzenie podstawowych klas/funkcji
+    Dodanie podstawowych funkcji   
+    Testowanie tych funkcji
 
-3. Testowanie i weryfikacja działania świerk#
+3. Zrobienie gier hazardowych i itch testowanie
 
-    Dodanie testów jednostkowych
-    Przeprowadzenie testów funkcjonalnych
+    Dodanie gier hazardowych
+    Testowanie ich działania
 
 4. Dokumentacja projektu świerk#
 
