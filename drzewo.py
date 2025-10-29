@@ -1,19 +1,14 @@
 
-
 import tkinter as tk
-from tkinter import messagebox, Toplevel, Canvas, filedialog, simpledialog
+from tkinter import messagebox, Toplevel, Canvas
 import random
 import json
 from datetime import datetime
 import os
-import glob
-import shutil
-import traceback
 
-# ---------------- Configuration / constants ----------------
+# --- Config / constants ---
 SAVE_FILE = "savegame.json"
-BACKUP_ON_SAVE = True
-BACKUP_GLOB = "savegame_*.json"
+BACKUP_ON_SAVE = True  # Zapisz kopię zapasową z timestampem przy każdym zapisie
 
 TREE_TYPES = [
     {"name": "Sosna", "color": "#B2B377"},
@@ -23,8 +18,6 @@ TREE_TYPES = [
     {"name": "Buk", "color": "#709775"}
 ]
 
-BASE_PRICE = {"Sosna": 20, "Świerk": 25, "Dąb": 40, "Brzoza": 15, "Buk": 35}
-
 FURNITURE_TYPES = {
     "Stół": {"cost": 3, "icon": "🪑"},
     "Krzesło": {"cost": 2, "icon": "🪑"},
@@ -32,196 +25,157 @@ FURNITURE_TYPES = {
     "Łóżko": {"cost": 4, "icon": "🛏️"}
 }
 
-LOAN_INTEREST_RATE = 0.23  # 23% jednorazowo (principal + 23% added to debt)
-FIRE_CHANCE_PER_DAY = 0.08  # 8% chance of fire each day
-INSPECTION_CHANCE_PER_DAY = 0.07  # 7% chance of police inspection confiscating trees
-INSURANCE_BASE_COST = 50
-INSURANCE_EFFECTIVENESS = 0.8  # restores this fraction of lost trees if insured
+LOAN_INTEREST_RATE = 0.23  # 23% jednorazowo doliczane do długu przy zaciągnięciu pożyczki
+FIRE_CHANCE_PER_DAY = 0.08  # 8% szansa na pożar w end_day
 
-# ---------------- Helper classes ----------------
-class Worker:
-    def __init__(self, name, salary, bonus_logs_per_day):
-        self.name = name
-        self.salary = salary
-        self.bonus = bonus_logs_per_day
+# Base price table (bazowe ceny brutto)
+BASE_PRICE_TABLE = {"Sosna": 20, "Świerk": 25, "Dąb": 40, "Brzoza": 15, "Buk": 35}
 
-    def to_dict(self):
-        return {"name": self.name, "salary": self.salary, "bonus": self.bonus}
+# How much prices can vary from base each day (e.g. 0.2 = ±20%)
+MARKET_VOLATILITY = 0.20
 
-    @staticmethod
-    def from_dict(d):
-        return Worker(d["name"], d["salary"], d["bonus"])
-
-# ---------------- Main game class ----------------
 class TycoonGame:
     def __init__(self, master):
         self.master = master
-        master.title("Las Tycoon — pełna wersja (restore/save options)")
-
-        # UI colors
+        master.title("Las Tycoon + Dom + Hazard + Podatki/Opłaty")
+        # Colors / style
         self.bg_color = "#23272A"
         self.panel_color = "#1A936F"
         self.btn_color = "#4A6FA5"
         self.text_color = "#F6F5F5"
         self.warn_color = "#D7263D"
 
-        # initialize state (use method so reset can reuse)
-        self._init_default_state()
-
-        # Build UI
-        master.configure(bg=self.bg_color)
-        self.title_label = tk.Label(master, text="Las Tycoon - rozbudowana", font=("Helvetica", 20, "bold"),
-                                    fg=self.text_color, bg=self.bg_color)
-        self.title_label.pack(pady=6)
-
-        # Top controls
-        top_frame = tk.Frame(master, bg=self.bg_color)
-        top_frame.pack(pady=2, fill=tk.X)
-
-        self.select_frame = tk.Frame(top_frame, bg=self.bg_color)
-        self.select_frame.pack(side=tk.LEFT)
-        tk.Label(self.select_frame, text="Wybierz drzewo:", fg=self.text_color, bg=self.bg_color).pack(side=tk.LEFT)
-        self.tree_var = tk.StringVar(value=self.selected_tree)
-        for tree in TREE_TYPES:
-            tk.Radiobutton(self.select_frame, text=tree["name"], variable=self.tree_var, value=tree["name"],
-                           fg=self.bg_color, bg=tree["color"], font=("Helvetica", 10, "bold"),
-                           selectcolor=self.panel_color, indicatoron=0, command=self.select_tree,
-                           width=10, height=1).pack(side=tk.LEFT, padx=2)
-
-        # Stats label
-        self.stats_label = tk.Label(master, font=("Helvetica", 12), bg=self.panel_color, fg=self.text_color, justify=tk.LEFT)
-        self.stats_label.pack(pady=6, fill=tk.X)
-
-        # Main actions
-        self.cut_btn = tk.Button(master, text="Wytnij drzewo (zbierz drewno) 🌳", command=self.cut_tree, bg=self.btn_color, fg=self.text_color)
-        self.cut_btn.pack(pady=3)
-
-        action_frame = tk.Frame(master, bg=self.bg_color)
-        action_frame.pack(pady=4)
-        self.sell_btn = tk.Button(action_frame, text="Sprzedaj drewno 💸", command=self.sell_tree, bg=self.btn_color, fg=self.text_color)
-        self.sell_btn.pack(side=tk.LEFT, padx=3)
-        self.burn_btn = tk.Button(action_frame, text="Spal drewno 🔥", command=self.burn_tree, bg=self.btn_color, fg=self.text_color)
-        self.burn_btn.pack(side=tk.LEFT, padx=3)
-        self.mass_sell_btn = tk.Button(action_frame, text="Sprzedaj WSZYSTKIE drewno 💰", command=self.sell_all_logs, bg=self.warn_color, fg="white")
-        self.mass_sell_btn.pack(side=tk.LEFT, padx=3)
-
-        jail_frame = tk.Frame(master, bg=self.bg_color)
-        jail_frame.pack(pady=2)
-        self.jail_btn = tk.Button(jail_frame, text="Ryzykuj więzienie 🚔", command=self.go_to_jail, bg=self.warn_color, fg="white")
-        self.jail_btn.pack(side=tk.LEFT, padx=3)
-
-        # Home and furniture
-        furn_frame = tk.Frame(master, bg=self.bg_color)
-        furn_frame.pack(pady=4)
-        self.home_btn = tk.Button(furn_frame, text="Otwórz DOM 🏠", command=self.open_home, bg=self.panel_color, fg=self.text_color)
-        self.home_btn.pack(side=tk.LEFT, padx=3)
-        self.craft_furniture_btn = tk.Button(furn_frame, text="Zrób mebel", command=self.craft_furniture, bg=self.btn_color, fg=self.text_color)
-        self.craft_furniture_btn.pack(side=tk.LEFT, padx=3)
-        self.insurance_btn = tk.Button(furn_frame, text="Kup ubezpieczenie 🔐", command=self.buy_insurance, bg="#996633", fg="white")
-        self.insurance_btn.pack(side=tk.LEFT, padx=3)
-
-        # Hazard
-        hazard_frame = tk.Frame(master, bg=self.bg_color)
-        hazard_frame.pack(pady=4)
-        self.hazard_btn = tk.Button(hazard_frame, text="Hazard 🎲", command=self.open_hazard_menu, bg="#FFD700")
-        self.hazard_btn.pack(side=tk.LEFT, padx=3)
-
-        # Lower controls: workers, market, history, backup, import/export, taxes info
-        lower_frame = tk.Frame(master, bg=self.bg_color)
-        lower_frame.pack(pady=6, fill=tk.X)
-        self.worker_btn = tk.Button(lower_frame, text="Zatrudnij / Zarządzaj pracownikami 👷", command=self.open_workers_menu, bg="#8A2BE2", fg="white")
-        self.worker_btn.pack(side=tk.LEFT, padx=3)
-        self.market_btn = tk.Button(lower_frame, text="Rynek 🏷️", command=self.open_market, bg="#2E8B57", fg="white")
-        self.market_btn.pack(side=tk.LEFT, padx=3)
-        self.history_btn = tk.Button(lower_frame, text="Historia zdarzeń 📜", command=self.open_event_log, bg="#607D8B", fg="white")
-        self.history_btn.pack(side=tk.LEFT, padx=3)
-        self.export_btn = tk.Button(lower_frame, text="Eksportuj zapis", command=self.export_save, bg="#555", fg="white")
-        self.export_btn.pack(side=tk.LEFT, padx=3)
-        self.import_btn = tk.Button(lower_frame, text="Importuj zapis", command=self.import_save, bg="#555", fg="white")
-        self.import_btn.pack(side=tk.LEFT, padx=3)
-        self.backups_btn = tk.Button(lower_frame, text="Lista backupów", command=self.open_backups_list, bg="#666", fg="white")
-        self.backups_btn.pack(side=tk.LEFT, padx=3)
-
-        # New: restore and reset buttons
-        self.restore_btn = tk.Button(lower_frame, text="Przywróć zapis (z backupu)", command=self.restore_save_from_backup, bg="#336699", fg="white")
-        self.restore_btn.pack(side=tk.LEFT, padx=3)
-        self.reset_btn = tk.Button(lower_frame, text="Przywróć domyślne", command=self.reset_game_to_defaults, bg="#992222", fg="white")
-        self.reset_btn.pack(side=tk.LEFT, padx=3)
-
-        self.taxes_info_btn = tk.Button(lower_frame, text="Podatki ℹ️", command=self.open_taxes_info, bg="#333", fg="white")
-        self.taxes_info_btn.pack(side=tk.LEFT, padx=3)
-
-        # Controls: loans, save, end day
-        control_frame = tk.Frame(master, bg=self.bg_color)
-        control_frame.pack(pady=4)
-        self.loan_btn = tk.Button(control_frame, text="Weź pożyczkę 💳", command=self.open_loan_window, bg="#aa8844", fg="white")
-        self.loan_btn.pack(side=tk.LEFT, padx=3)
-        self.save_btn = tk.Button(control_frame, text="Zapisz grę", command=self.save_game, bg="#4CAF50", fg="white")
-        self.save_btn.pack(side=tk.LEFT, padx=3)
-        self.end_day_btn = tk.Button(control_frame, text="Koniec dnia 🌒", command=self.end_day, bg=self.panel_color, fg=self.text_color)
-        self.end_day_btn.pack(side=tk.LEFT, padx=3)
-
-        # Safe load from save if exists
-        self.load_game_if_exists()
-
-        self.update_stats()
-
-        # set on_closing handler (now exists)
-        master.protocol("WM_DELETE_WINDOW", self.on_closing)
-
-    # ---------------- State initialization & reset ----------------
-    def _init_default_state(self):
-        # default starting state; used by __init__ and reset
+        # --- Game state ---
         self.money = 200
         self.debt = 0
-        self.trees = {t["name"]: 5 for t in TREE_TYPES}
-        self.logs = {t["name"]: 0 for t in TREE_TYPES}
+        self.trees = {tree["name"]: 5 for tree in TREE_TYPES}
+        # logs = drewno (pozyskiwane przy ścince)
+        self.logs = {tree["name"]: 0 for tree in TREE_TYPES}
         self.selected_tree = TREE_TYPES[0]["name"]
         self.jail = False
         self.home_furniture = []
         self.furniture_counts = {name: 0 for name in FURNITURE_TYPES}
+        self.furniture_buy_price = 120
+        self.furniture_sell_price = 180
+        self.fine_amount = 100
+        self.jail_min = 5
+        self.jail_max = 150
         self.day = 1
         self.days_passed = 0
 
-        # Taxes (new model)
-        self.base_income_tax = 0.10
-        self.tax_fluctuation = 0.0
-        self.base_property_tax_per_tree = 1
-        self.property_tax_fluctuation = 0.0
+        # Taxes
+        self.income_tax_rate = 0.10  # 10% tax on sell earnings
+        self.property_tax_per_tree = 1  # per tree per day
+        self.property_tax_per_furniture = 2  # extra per furniture item per day
 
-        # Workers
-        self.workers = []
-        self.available_workers = [
-            Worker("Leśniczy", 20, 1),
-            Worker("Ogrodnik", 40, 2),
-            Worker("Ekspert od świerku", 70, 3)
-        ]
+        # Market prices (initialized from base)
+        self.market_prices = BASE_PRICE_TABLE.copy()
+        # initialize daily randomization once at start
+        self.randomize_market_prices(initial=True)
 
-        # Market
-        self.market_prices = BASE_PRICE.copy()
-        self.market_history = {k: [v] for k, v in BASE_PRICE.items()}
+        # UI setup
+        master.configure(bg=self.bg_color)
+        self.title_label = tk.Label(master, text="Las Tycoon + Dom + Hazard + Podatki/Opłaty", font=("Helvetica", 22, "bold"), fg=self.text_color, bg=self.bg_color)
+        self.title_label.pack(pady=10)
 
-        # Insurance & achievements & logs
-        self.insured_until_day = 0
-        self.achievements = set()
-        self.event_log = []
+        self.select_frame = tk.Frame(master, bg=self.bg_color)
+        self.select_frame.pack(pady=5)
+        tk.Label(self.select_frame, text="Wybierz typ drzewa:", font=("Helvetica", 14), fg=self.text_color, bg=self.bg_color).pack(side=tk.LEFT)
+        self.tree_var = tk.StringVar(value=self.selected_tree)
+        for tree in TREE_TYPES:
+            tk.Radiobutton(self.select_frame, text=tree["name"], variable=self.tree_var, value=tree["name"],
+                           fg=self.bg_color, bg=tree["color"], font=("Helvetica", 14, "bold"),
+                           selectcolor=self.panel_color, indicatoron=0, command=self.select_tree, width=10, height=2).pack(side=tk.LEFT, padx=4)
 
-    def reset_game_to_defaults(self):
-        if not self.ask_modal_yes_no("Przywróć domyślne", "Czy na pewno chcesz zresetować grę do stanu początkowego? To nadpisze obecny save."):
-            self.append_log("Reset do domyślnych anulowany przez gracza.")
-            return
-        self._init_default_state()
-        # save the new default state to SAVE_FILE
-        try:
-            with open(SAVE_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.get_state(), f, ensure_ascii=False, indent=2)
-            self.append_log("Zresetowano grę do domyślnych i zapisano do savegame.json.")
-            messagebox.showinfo("Reset", "Zresetowano grę do stanu początkowego i zapisano.")
-        except Exception as e:
-            messagebox.showerror("Błąd", f"Nie udało się zapisać po resecie: {e}")
+        self.stats_label = tk.Label(master, font=("Helvetica", 15), bg=self.panel_color, fg=self.text_color, justify=tk.LEFT)
+        self.stats_label.pack(pady=10, fill=tk.X)
+
+        self.cut_btn = tk.Button(master, text="Wytnij drzewo (zbierz drewno) 🌳", font=("Helvetica", 15, "bold"), bg=self.btn_color, fg=self.text_color, command=self.cut_tree, height=2, width=28)
+        self.cut_btn.pack(pady=6)
+
+        self.action_frame = tk.Frame(master, bg=self.bg_color)
+        self.action_frame.pack(pady=6)
+        self.sell_btn = tk.Button(self.action_frame, text="Sprzedaj drewno 💸", font=("Helvetica", 15, "bold"), bg=self.btn_color, fg=self.text_color, command=self.sell_tree, height=2, width=20)
+        self.sell_btn.pack(side=tk.LEFT, padx=4)
+        self.burn_btn = tk.Button(self.action_frame, text="Spal drewno w domu 🔥", font=("Helvetica", 15, "bold"), bg=self.btn_color, fg=self.text_color, command=self.burn_tree, height=2, width=26)
+        self.burn_btn.pack(side=tk.LEFT, padx=4)
+        self.mass_sell_btn = tk.Button(self.action_frame, text="Sprzedaj WSZYSTKIE drewno 💰", font=("Helvetica", 15, "bold"), bg=self.warn_color, fg=self.text_color, command=self.sell_all_logs, height=2, width=28)
+        self.mass_sell_btn.pack(side=tk.LEFT, padx=4)
+
+        self.jail_btn = tk.Button(master, text="Ryzykuj więzienie 🚔", font=("Helvetica", 15, "bold"), bg=self.warn_color, fg=self.text_color, command=self.go_to_jail, height=2, width=24)
+        self.jail_btn.pack(pady=6)
+
+        self.furniture_frame = tk.Frame(master, bg=self.bg_color)
+        self.furniture_frame.pack(pady=6)
+        self.home_btn = tk.Button(self.furniture_frame, text="Otwórz DOM 🏠", font=("Helvetica", 15, "bold"), bg=self.panel_color, fg=self.text_color, command=self.open_home, height=2, width=17)
+        self.home_btn.pack(side=tk.LEFT, padx=4)
+        self.craft_furniture_btn = tk.Button(self.furniture_frame, text=f"Zrób mebel", font=("Helvetica", 15, "bold"), bg=self.btn_color, fg=self.text_color, command=self.craft_furniture, height=2, width=17)
+        self.craft_furniture_btn.pack(side=tk.LEFT, padx=4)
+
+        self.hazard_frame = tk.Frame(master, bg=self.bg_color)
+        self.hazard_frame.pack(pady=6)
+        tk.Button(self.hazard_frame, text="Hazard 🎲", font=("Helvetica", 15, "bold"), bg="#FFD700", fg="black", command=self.open_hazard_menu, height=2, width=12).pack(side=tk.LEFT, padx=4)
+
+        lower_frame = tk.Frame(master, bg=self.bg_color)
+        lower_frame.pack(pady=6)
+
+        self.tax_settings_btn = tk.Button(lower_frame, text="Ustawienia podatków ⚙️", font=("Helvetica", 12), bg="#888", fg="white", command=self.open_tax_settings)
+        self.tax_settings_btn.pack(side=tk.LEFT, padx=4)
+
+        # NEW: loan button
+        self.loan_btn = tk.Button(lower_frame, text="Weź pożyczkę 💳", font=("Helvetica", 12), bg="#aa8844", fg="white", command=self.open_loan_window)
+        self.loan_btn.pack(side=tk.LEFT, padx=4)
+
+        # Rynek button
+        self.market_btn = tk.Button(lower_frame, text="📊 Rynek", font=("Helvetica", 12), bg="#6a1b9a", fg="white", command=self.open_market_window)
+        self.market_btn.pack(side=tk.LEFT, padx=4)
+
+        self.end_day_btn = tk.Button(master, text="Koniec dnia 🌒", font=("Helvetica", 15, "bold"), bg=self.panel_color, fg=self.text_color, command=self.end_day, height=2, width=22)
+        self.end_day_btn.pack(pady=10)
+
+        # --- Przyciski zarządzania zapisem (prawy górny róg) ---
+        top_corner_frame = tk.Frame(master, bg=self.bg_color)
+        top_corner_frame.place(relx=1.0, rely=0.0, anchor="ne")  # prawy górny róg
+        self.load_btn = tk.Button(
+            top_corner_frame,
+            text="📂 Wczytaj grę",
+            font=("Helvetica", 11, "bold"),
+            bg="#888",
+            fg="white",
+            command=self.manual_load_game
+        )
+        self.load_btn.pack(padx=6, pady=6)
+
+        # load if exists
+        self.load_game_if_exists()
+
+        # ensure stats reflect loaded state
         self.update_stats()
 
-    # ---------------- Safe load/save & state ----------------
+        # autosave on close
+        master.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+    # ----------------- market -----------------
+    def randomize_market_prices(self, initial=False):
+        """Ustaw losowe ceny rynkowe na podstawie BASE_PRICE_TABLE i MARKET_VOLATILITY.
+        Jeśli initial==True -> inicjalizacja przy starcie (może być mniej zmienna)."""
+        for k, base in BASE_PRICE_TABLE.items():
+            # We vary by a factor in [-MARKET_VOLATILITY, +MARKET_VOLATILITY]
+            # On initial load we still randomize but can be slightly milder (not necessary)
+            var = random.uniform(-MARKET_VOLATILITY, MARKET_VOLATILITY)
+            self.market_prices[k] = max(1, int(round(base * (1 + var))))
+
+    def open_market_window(self):
+        mw = Toplevel(self.master)
+        mw.title("Rynek - ceny drewna")
+        mw.geometry("360x280")
+        mw.configure(bg=self.bg_color)
+        tk.Label(mw, text=f"Ceny (Dzień {self.day})", font=("Helvetica", 14, "bold"), fg=self.text_color, bg=self.bg_color).pack(pady=8)
+        for name in self.market_prices:
+            tk.Label(mw, text=f"{name}: {self.market_prices[name]} zł (brutto)", font=("Helvetica", 13), fg=self.text_color, bg=self.bg_color).pack(anchor="w", padx=10)
+        tk.Button(mw, text="Odśwież (losowe dziś)", command=lambda: (self.randomize_market_prices(), mw.destroy(), self.open_market_window()), bg=self.btn_color).pack(pady=10)
+
+    # ----------------- state / save/load -----------------
     def get_state(self):
         return {
             "money": self.money,
@@ -234,413 +188,266 @@ class TycoonGame:
             "furniture_counts": self.furniture_counts,
             "day": self.day,
             "days_passed": self.days_passed,
-            "base_income_tax": self.base_income_tax,
-            "tax_fluctuation": self.tax_fluctuation,
-            "base_property_tax_per_tree": self.base_property_tax_per_tree,
-            "property_tax_fluctuation": self.property_tax_fluctuation,
-            "workers": [w.to_dict() for w in self.workers],
+            "income_tax_rate": self.income_tax_rate,
+            "property_tax_per_tree": self.property_tax_per_tree,
+            "property_tax_per_furniture": self.property_tax_per_furniture,
             "market_prices": self.market_prices,
-            "market_history": self.market_history,
-            "insured_until_day": self.insured_until_day,
-            "achievements": list(self.achievements),
-            "event_log": self.event_log,
             "last_saved_at": datetime.utcnow().isoformat()
         }
 
-    def load_from_state(self, data):
-        try:
-            self.money = data.get("money", self.money)
-            self.debt = data.get("debt", self.debt)
-            self.trees = data.get("trees", self.trees)
-            self.logs = data.get("logs", self.logs)
-            self.selected_tree = data.get("selected_tree", self.selected_tree)
-            self.jail = data.get("jail", self.jail)
-            self.home_furniture = data.get("home_furniture", self.home_furniture)
-            self.furniture_counts = data.get("furniture_counts", self.furniture_counts)
-            self.day = data.get("day", self.day)
-            self.days_passed = data.get("days_passed", self.days_passed)
-            self.base_income_tax = data.get("base_income_tax", self.base_income_tax)
-            self.tax_fluctuation = data.get("tax_fluctuation", self.tax_fluctuation)
-            self.base_property_tax_per_tree = data.get("base_property_tax_per_tree", self.base_property_tax_per_tree)
-            self.property_tax_fluctuation = data.get("property_tax_fluctuation", self.property_tax_fluctuation)
-            self.workers = [Worker.from_dict(wd) for wd in data.get("workers", [])]
-            self.market_prices = data.get("market_prices", BASE_PRICE.copy())
-            self.market_history = data.get("market_history", {k: [v] for k, v in BASE_PRICE.items()})
-            self.insured_until_day = data.get("insured_until_day", self.insured_until_day)
-            self.achievements = set(data.get("achievements", []))
-            self.event_log = data.get("event_log", self.event_log)
-        except Exception:
-            raise
-
-    def save_game(self):
+    def save_game(self, filename=SAVE_FILE):
         data = self.get_state()
         try:
-            if BACKUP_ON_SAVE and os.path.exists(SAVE_FILE):
+            if BACKUP_ON_SAVE and os.path.exists(filename):
                 ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-                bakname = f"savegame_{ts}.json"
-                with open(bakname, "w", encoding="utf-8") as bf:
+                bak = f"savegame_{ts}.json"
+                with open(bak, "w", encoding="utf-8") as bf:
                     json.dump(data, bf, ensure_ascii=False, indent=2)
-            with open(SAVE_FILE, "w", encoding="utf-8") as f:
+            with open(filename, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-            self.append_log(f"Zapisano grę do {SAVE_FILE}.")
-            messagebox.showinfo("Zapis", f"Zapisano grę do {SAVE_FILE}.")
-            self.update_stats()
+            messagebox.showinfo("Zapis", f"Zapisano grę do {filename}.")
         except Exception as e:
             messagebox.showerror("Błąd zapisu", str(e))
 
-    def export_save(self):
-        data = self.get_state()
-        path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON files", "*.json")])
-        if not path:
-            return
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            self.append_log(f"Wyeksportowano zapis do {path}.")
-            messagebox.showinfo("Eksport", f"Zapis wyeksportowany do {path}.")
-        except Exception as e:
-            messagebox.showerror("Błąd eksportu", str(e))
-
-    def import_save(self):
-        path = filedialog.askopenfilename(filetypes=[("JSON files", "*.json")])
-        if not path:
-            return
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if not self.ask_modal_yes_no("Import zapisu", "Wczytać zapis (nadpisze stan gry)?"):
-                self.append_log("Import zapisów anulowany przez gracza.")
-                return
-            self.load_from_state(data)
-            self.append_log(f"Wczytano zapis z {path}.")
-            messagebox.showinfo("Import", "Wczytano zapis.")
-            self.update_stats()
-        except Exception as e:
-            messagebox.showerror("Błąd importu", str(e))
-
     def load_game_if_exists(self):
-        if not os.path.exists(SAVE_FILE):
-            return
         try:
             with open(SAVE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            # Use modal to avoid accidental exit (fix reported issue)
-            if not self.ask_modal_yes_no("Wczytaj zapis", "Znaleziono plik zapisu. Wczytać?"):
-                self.append_log("Użytkownik wybrał nie wczytywać zapisu (kontynuacja nowej gry).")
-                return
-            try:
-                self.load_from_state(data)
-                self.append_log(f"Wczytano zapis: {SAVE_FILE}.")
+            # confirm with user
+            if messagebox.askyesno("Wczytaj zapis", "Znaleziono plik zapisu. Wczytać?"):
+                self.load_from_dict(data)
                 messagebox.showinfo("Wczytano", f"Wczytano zapis. Ostatni zapis: {data.get('last_saved_at')}")
-            except Exception as e:
-                raise
-        except json.JSONDecodeError as e:
-            ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-            corrupt_name = f"savegame_corrupt_{ts}.json"
-            try:
-                shutil.copy2(SAVE_FILE, corrupt_name)
-            except Exception:
-                pass
-            messagebox.showwarning("Błąd wczytywania zapisu", f"Plik {SAVE_FILE} jest uszkodzony (JSON). Skopiowano {corrupt_name} i uruchomiono nową grę.")
-            self.append_log(f"Błąd JSON przy wczytywaniu {SAVE_FILE}: {e}. Kopia: {corrupt_name}")
-        except Exception:
-            tb = traceback.format_exc()
-            with open("error.log", "a", encoding="utf-8") as ef:
-                ef.write(f"\n[{datetime.utcnow().isoformat()}] Błąd podczas ładowania zapisu:\n{tb}\n")
-            messagebox.showerror("Błąd", "Wystąpił błąd podczas wczytywania zapisu. Szczegóły w error.log")
-            self.append_log("Błąd podczas wczytywania zapisu; sprawdź error.log.")
-
-    # Custom modal yes/no dialog (safe, doesn't close main app)
-    def ask_modal_yes_no(self, title, question):
-        dlg = Toplevel(self.master)
-        dlg.title(title)
-        dlg.transient(self.master)
-        dlg.grab_set()
-        res = {"value": False, "answered": False}
-
-        tk.Label(dlg, text=question, font=("Helvetica", 11)).pack(padx=20, pady=12)
-        btn_frame = tk.Frame(dlg)
-        btn_frame.pack(pady=8)
-        def choose_yes():
-            res["value"] = True
-            res["answered"] = True
-            dlg.destroy()
-        def choose_no():
-            res["value"] = False
-            res["answered"] = True
-            dlg.destroy()
-        yes_btn = tk.Button(btn_frame, text="Tak", width=10, command=choose_yes, bg=self.btn_color, fg="white")
-        yes_btn.pack(side=tk.LEFT, padx=8)
-        no_btn = tk.Button(btn_frame, text="Nie", width=10, command=choose_no, bg=self.warn_color, fg="white")
-        no_btn.pack(side=tk.LEFT, padx=8)
-        self.master.wait_window(dlg)
-        return res["value"]
-
-    # ---------------- Event log ----------------
-    def append_log(self, text):
-        ts = datetime.utcnow().isoformat()
-        self.event_log.append({"time": ts, "text": text})
-        if len(self.event_log) > 2000:
-            self.event_log = self.event_log[-2000:]
-
-    def open_event_log(self):
-        w = Toplevel(self.master)
-        w.title("Historia zdarzeń")
-        w.geometry("780x480")
-        tk.Label(w, text="Historia zdarzeń (ostatnie):", font=("Helvetica", 12)).pack(pady=4)
-        text = tk.Text(w, wrap=tk.WORD)
-        text.pack(expand=True, fill=tk.BOTH)
-        for e in self.event_log[-1000:]:
-            text.insert(tk.END, f"[{e['time']}] {e['text']}\n")
-        text.config(state=tk.DISABLED)
-        def export_log():
-            path = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text", "*.txt")])
-            if not path:
-                return
-            try:
-                with open(path, "w", encoding="utf-8") as f:
-                    for e in self.event_log:
-                        f.write(f"[{e['time']}] {e['text']}\n")
-                messagebox.showinfo("Eksport", f"Wyeksportowano log do {path}.")
-            except Exception as ex:
-                messagebox.showerror("Błąd", str(ex))
-        tk.Button(w, text="Eksportuj log", command=export_log, bg=self.btn_color).pack(pady=6)
-
-    # ---------------- backups list ----------------
-    def open_backups_list(self):
-        w = Toplevel(self.master)
-        w.title("Backupy zapisu")
-        w.geometry("420x380")
-        tk.Label(w, text="Lista backupów:", font=("Helvetica", 12)).pack(pady=4)
-        listbox = tk.Listbox(w, width=80)
-        listbox.pack(expand=True, fill=tk.BOTH)
-        for path in sorted(glob.glob(BACKUP_GLOB), reverse=True):
-            listbox.insert(tk.END, path)
-        def load_selected():
-            sel = listbox.curselection()
-            if not sel:
-                return
-            path = listbox.get(sel[0])
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if not self.ask_modal_yes_no("Wczytaj backup", f"Wczytać backup {path}?"):
-                    self.append_log("Wczytanie backupu anulowane przez gracza.")
-                    return
-                self.load_from_state(data)
-                self.append_log(f"Wczytano backup {path}.")
-                messagebox.showinfo("Wczytano", "Wczytano backup.")
-                self.update_stats()
-            except Exception as e:
-                messagebox.showerror("Błąd", str(e))
-        tk.Button(w, text="Wczytaj wybrany backup", command=load_selected, bg=self.btn_color).pack(pady=6)
-
-    # ---------------- Restore save from backup ----------------
-    def restore_save_from_backup(self):
-        """
-        Allows user to select a backup file and restore it as the main save (savegame.json).
-        The selected backup is copied to SAVE_FILE and then loaded into the running game.
-        """
-        backups = sorted(glob.glob(BACKUP_GLOB), reverse=True)
-        if not backups:
-            messagebox.showinfo("Przywróć zapis", "Brak backupów do przywrócenia.")
+        except FileNotFoundError:
             return
-        # small dialog to pick a backup
-        w = Toplevel(self.master)
-        w.title("Przywróć zapis (wybierz backup)")
-        w.geometry("480x360")
-        tk.Label(w, text="Wybierz backup, który chcesz przywrócić jako główny zapis:", font=("Helvetica", 11)).pack(pady=6)
-        listbox = tk.Listbox(w, width=80)
-        listbox.pack(expand=True, fill=tk.BOTH, padx=8)
-        for p in backups:
-            listbox.insert(tk.END, p)
-        def do_restore():
-            sel = listbox.curselection()
-            if not sel:
-                return
-            path = listbox.get(sel[0])
-            if not self.ask_modal_yes_no("Potwierdź przywrócenie", f"Czy na pewno chcesz przywrócić backup:\n{path}\nTo nadpisze obecny savegame.json."):
-                self.append_log("Przywracanie backupu anulowane przez gracza.")
-                return
-            try:
-                shutil.copy2(path, SAVE_FILE)
-                # load new save into game
-                with open(SAVE_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                self.load_from_state(data)
-                self.append_log(f"Przywrócono backup {path} jako {SAVE_FILE}.")
-                messagebox.showinfo("Przywrócono", f"Przywrócono backup {path} jako główny zapis.")
-                self.update_stats()
-                w.destroy()
-            except Exception as e:
-                messagebox.showerror("Błąd przywracania", str(e))
-        tk.Button(w, text="Przywróć wybrany backup", command=do_restore, bg="#336699").pack(pady=8)
+        except Exception as e:
+            messagebox.showerror("Błąd odczytu zapisu", str(e))
 
-    # ---------------- UI / state updates ----------------
+    def manual_load_game(self):
+        """Ręczne wczytanie gry z przycisku."""
+        try:
+            with open(SAVE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if messagebox.askyesno("Wczytaj grę", "Na pewno chcesz wczytać zapis? Niezapisane zmiany przepadną."):
+                self.load_from_dict(data)
+                messagebox.showinfo("Wczytano", f"Wczytano zapis z pliku {SAVE_FILE}.")
+                self.update_stats()
+        except FileNotFoundError:
+            messagebox.showwarning("Brak zapisu", "Nie znaleziono pliku savegame.json.")
+        except Exception as e:
+            messagebox.showerror("Błąd", f"Nie udało się wczytać gry: {e}")
+
+    def load_from_dict(self, data):
+        self.money = data.get("money", self.money)
+        self.debt = data.get("debt", self.debt)
+        self.trees = data.get("trees", self.trees)
+        self.logs = data.get("logs", self.logs)
+        self.selected_tree = data.get("selected_tree", self.selected_tree)
+        self.jail = data.get("jail", self.jail)
+        self.home_furniture = data.get("home_furniture", self.home_furniture)
+        self.furniture_counts = data.get("furniture_counts", self.furniture_counts)
+        self.day = data.get("day", self.day)
+        self.days_passed = data.get("days_passed", self.days_passed)
+        self.income_tax_rate = data.get("income_tax_rate", self.income_tax_rate)
+        self.property_tax_per_tree = data.get("property_tax_per_tree", self.property_tax_per_tree)
+        self.property_tax_per_furniture = data.get("property_tax_per_furniture", self.property_tax_per_furniture)
+        # load market prices if present, otherwise keep current randomized
+        self.market_prices = data.get("market_prices", self.market_prices)
+
+    # ----------------- UI / actions -----------------
     def select_tree(self):
         self.selected_tree = self.tree_var.get()
         self.update_stats()
 
-    def compute_current_income_tax(self):
-        bracket = 0.0
-        if self.money > 5000:
-            bracket = 0.10
-        elif self.money > 2000:
-            bracket = 0.05
-        elif self.money > 1000:
-            bracket = 0.02
-        current = self.base_income_tax + bracket + self.tax_fluctuation
-        current = max(0.0, min(0.6, current))
-        return current
-
-    def compute_current_property_tax_per_tree(self):
-        avg_price = sum(self.market_prices.values()) / len(self.market_prices)
-        price_component = int((avg_price - 20) / 30)
-        current = max(0, int(self.base_property_tax_per_tree + round(self.property_tax_fluctuation * 3) + price_component))
-        return current
-
     def update_stats(self):
         trees_state = " | ".join([f"{name}: {self.trees.get(name,0)}" for name in self.trees])
-        logs_state = " | ".join([f"{name}: {self.logs.get(name,0)}" for name in self.logs])
-        workers_state = " | ".join([f"{w.name}(+{w.bonus}/d, {w.salary}zł)" for w in self.workers]) if self.workers else "brak"
-        market_state = " | ".join([f"{k}: {v}zł" for k, v in self.market_prices.items()])
-        insured = "TAK" if self.insured_until_day >= self.day else "NIE"
-        debt_info = f" | DŁUG: {self.debt} zł" if self.debt > 0 else ""
+        logs_state = " | ".join([f"{name} (drewno): {self.logs.get(name,0)}" for name in self.logs])
+        debt_info = f" | DŁUG: {self.debt} zł (komornik!)" if self.debt > 0 else ""
         jail_info = " | W WIĘZIENIU!" if self.jail else ""
-        ach_count = len(self.achievements)
-        income_tax_percent = int(self.compute_current_income_tax() * 100)
-        prop_tax = self.compute_current_property_tax_per_tree()
+        furniture_state = " | ".join([f"{name}: {self.furniture_counts.get(name,0)}" for name in FURNITURE_TYPES])
+
+        # include market prices summary
+        prices_state = "Ceny dziś: " + " | ".join([f"{n}: {p}zł" for n,p in self.market_prices.items()])
+
         self.stats_label.config(
-            text=(
-                f"DZIEŃ: {self.day} (dni minęło: {self.days_passed}) | Pieniądze: {self.money} zł{debt_info}{jail_info}\n"
-                f"Drzewa: {trees_state}\nDrewno: {logs_state}\nWybrane drzewo: {self.selected_tree}\n"
-                f"Pracownicy: {workers_state}\nRynek: {market_state}\nUbezpieczenie: {insured}\nOsiągnięcia: {ach_count}\n"
-                f"Podatki: podatek dochodowy przy sprzedaży {income_tax_percent}% | podatek od drzewa: {prop_tax} zł/drzewo/dzień"
-            )
+            text=f"DZIEŃ: {self.day} (dni minęło: {self.days_passed}) | Pieniądze: {self.money} zł{debt_info}{jail_info}\nDrzewa: {trees_state}\nDrewno: {logs_state}\nWybrane drzewo: {self.selected_tree}\nMeble w domu: {furniture_state}\n{prices_state}"
         )
 
-    # ---------------- Core gameplay actions ----------------
-    def cut_tree(self):
-        if self.trees.get(self.selected_tree,0) > 0:
-            yield_count = 1
-            self.trees[self.selected_tree] -= 1
-            self.logs[self.selected_tree] = self.logs.get(self.selected_tree,0) + yield_count
-            self.append_log(f"Wycięto 1x {self.selected_tree} -> +{yield_count} drewna.")
+    def check_inspection_event(self):
+        """Losowy mini-event: inspekcja leśna zabierająca 1-5 drewien z inwentarza."""
+        if random.random() < 0.10:  # 10% szansy po każdej akcji
+            total_logs = sum(self.logs.values())
+            if total_logs <= 0:
+                return  # nic nie ma do zabrania
+            to_remove = random.randint(1, min(5, total_logs))
+            removed = {}
+            for _ in range(to_remove):
+                available = [t for t, c in self.logs.items() if c > 0]
+                if not available:
+                    break
+                t = random.choice(available)
+                self.logs[t] -= 1
+                removed[t] = removed.get(t, 0) + 1
+
+            msg = "Inspekcja leśna! 🌲\n"
+            msg += "Kontrola stwierdziła nieprawidłowości i skonfiskowała drewno:\n"
+            msg += ", ".join([f"{t}: {c}" for t, c in removed.items()])
+            messagebox.showwarning("Inspekcja!", msg)
+
+            # Autozapis po inspekcji
+            try:
+                self.save_game()
+            except Exception:
+                pass
             self.update_stats()
-            messagebox.showinfo("Wycięto", f"Wyciąłeś: {self.selected_tree}, zdobyłeś {yield_count} drewna.")
+
+    def cut_tree(self):
+        # Cutting produces logs and reduces number of standing trees
+        if self.trees.get(self.selected_tree,0) > 0:
+            # yield per tree can vary by species; default 1 log per tree
+            yield_count = 1
+            # decrease standing tree
+            self.trees[self.selected_tree] -= 1
+            # increase logs inventory
+            self.logs[self.selected_tree] = self.logs.get(self.selected_tree,0) + yield_count
+            messagebox.showinfo("Wycięto!", f"Wyciąłeś: {self.selected_tree} i zdobyłeś {yield_count} drewno(drewna).")
+            # check for inspection (10% chance)
+            self.check_inspection_event()
+            self.update_stats()
         else:
-            messagebox.showwarning("Brak drzew", f"Nie masz drzewa typu {self.selected_tree}.")
+            messagebox.showwarning("Brak drzew!", f"Nie masz więcej drzew typu {self.selected_tree}.")
 
     def _apply_income_tax(self, gross):
-        rate = self.compute_current_income_tax()
-        tax = int(gross * rate)
+        tax = int(gross * self.income_tax_rate)
         net = gross - tax
         return gross, tax, net
 
     def sell_tree(self):
+        # Now selling sells logs (wood) from inventory, not standing trees
         if self.jail:
-            messagebox.showerror("Więzienie", "Nie możesz sprzedawać w więzieniu.")
+            messagebox.showerror("Więzienie", "Nie możesz nic zrobić będąc w więzieniu! Poczekaj na koniec dnia.")
             return
         if self.logs.get(self.selected_tree,0) < 1:
-            messagebox.showwarning("Brak drewna", "Nie masz drewna tego typu do sprzedaży.")
+            messagebox.showwarning("Brak drewna!", "Nie masz drewna tego typu do sprzedaży.")
             return
-        if random.random() < 0.12:
+        # risk to be caught while selling (optional)
+        if random.random() < 0.12:  # slightly lower risk for selling logs
             self.go_to_jail()
+            self.update_stats()
             return
-        price = self.market_prices.get(self.selected_tree, BASE_PRICE[self.selected_tree])
-        gross, tax, net = self._apply_income_tax(price)
+        # use market price for the selected tree
+        gross = self.market_prices.get(self.selected_tree, BASE_PRICE_TABLE.get(self.selected_tree,0))
+        gross, tax, net = self._apply_income_tax(gross)
+        # add net to money; if this operation would push money < 0, we still allow and handle debt via check_debt
         self.money += net
         self.logs[self.selected_tree] -= 1
-        self.append_log(f"Sprzedano 1x {self.selected_tree} za {gross} zł (podatek {tax} zł). Uzyskano {net} zł.")
+        # check for inspection (10% chance)
+        self.check_inspection_event()
         self.check_debt_post_operation()
+        messagebox.showinfo("Sprzedaż", f"Sprzedałeś drewno: {self.selected_tree}.\nPrzychód brutto: {gross} zł\nPodatek: {tax} zł\nUzyskano: {net} zł")
         self.update_stats()
-        messagebox.showinfo("Sprzedaż", f"Sprzedano 1x {self.selected_tree}.\nBrutto: {gross} zł\nPodatek: {tax} zł\nUzyskano: {net} zł")
 
     def burn_tree(self):
+        # Burning uses logs as fuel
         if self.jail:
-            messagebox.showerror("Więzienie", "Nie możesz spalać w więzieniu.")
+            messagebox.showerror("Więzienie", "Nie możesz nic zrobić będąc w więzieniu! Poczekaj na koniec dnia.")
             return
         if self.logs.get(self.selected_tree,0) < 1:
-            messagebox.showwarning("Brak drewna", "Nie masz drewna tego typu.")
+            messagebox.showwarning("Brak drewna!", "Nie masz drewna tego typu.")
             return
-        burn_val = int(BASE_PRICE.get(self.selected_tree, 10) * 0.3)
-        gross, tax, net = self._apply_income_tax(burn_val)
+        # burning gives "savings" value based on market price fraction (we'll use a smaller number)
+        fuel_value_table = {"Sosna": 5, "Świerk": 7, "Dąb": 10, "Brzoza": 4, "Buk": 9}
+        gross = fuel_value_table.get(self.selected_tree, 0)
+        gross, tax, net = self._apply_income_tax(gross)
         self.money += net
         self.logs[self.selected_tree] -= 1
-        self.append_log(f"Spalono 1x {self.selected_tree} w domu, oszczędność brutto {gross} zł (podatek {tax} zł).")
+        # check for inspection (10% chance)
+        self.check_inspection_event()
         self.check_debt_post_operation()
+        messagebox.showinfo("Spalanie", f"Spaliłeś drewno: {self.selected_tree} w domu.\nOszczędność brutto: {gross} zł\nPodatek: {tax} zł\nUzyskano: {net} zł")
         self.update_stats()
-        messagebox.showinfo("Spalono", f"Spalono 1x {self.selected_tree}. Oszczędność: {net} zł (po podatku).")
 
     def sell_all_logs(self):
+        # Sell all logs from inventory
         if self.jail:
-            messagebox.showerror("Więzienie", "Nie możesz sprzedawać w więzieniu.")
+            messagebox.showerror("Więzienie", "Nie możesz nic zrobić będąc w więzieniu! Poczekaj na koniec dnia.")
             return
         total_cash = 0
         total_logs = 0
-        for name, count in list(self.logs.items()):
-            total_cash += count * self.market_prices.get(name, BASE_PRICE[name])
-            total_logs += count
+        for name in list(self.logs.keys()):
+            logs_to_sell = self.logs.get(name,0)
+            total_cash += logs_to_sell * self.market_prices.get(name, BASE_PRICE_TABLE.get(name,0))
+            total_logs += logs_to_sell
             self.logs[name] = 0
-        if total_logs == 0:
-            messagebox.showwarning("Brak drewna", "Nie masz drewna do sprzedaży.")
-            return
-        risk = 0.06 + max(0, (total_logs-10)*0.01)
-        if random.random() < risk:
-            self.go_to_jail()
-            return
-        gross, tax, net = self._apply_income_tax(total_cash)
-        self.money += net
-        self.append_log(f"Sprzedano masowo {total_logs} drewna. Brutto {gross} zł, podatek {tax} zł, uzyskano {net} zł.")
-        self.check_debt_post_operation()
+        risk = 0.06 + max(0, (total_logs-10)*0.01)  # risk adjusted
+        if total_logs > 0:
+            if random.random() < risk:
+                self.go_to_jail()
+                self.update_stats()
+                return
+            gross, tax, net = self._apply_income_tax(total_cash)
+            self.money += net
+            # check for inspection (10% chance)
+            self.check_inspection_event()
+            self.check_debt_post_operation()
+            messagebox.showinfo("Sprzedaż masowa", f"Sprzedałeś całe drewno.\nPrzychód brutto: {gross} zł\nPodatek: {tax} zł\nUzyskano: {net} zł")
+        else:
+            messagebox.showwarning("Brak drewna!", "Nie masz żadnego drewna do masowej sprzedaży.")
         self.update_stats()
-        messagebox.showinfo("Sprzedaż masowa", f"Sprzedano {total_logs} drewna.\nBrutto: {gross} zł\nPodatek: {tax} zł\nUzyskano: {net} zł")
 
     def go_to_jail(self):
         self.jail = True
-        jail_fine = random.choice([x for x in range(5, 151, 5)])
+        jail_fine = random.choice([x for x in range(self.jail_min, self.jail_max+1, 5)])
+        # fine may push into negative -> handled by check_debt_post_operation
         self.money -= jail_fine
-        self.append_log(f"Policja: złapano. Grzywna {jail_fine} zł.")
         self.check_debt_post_operation()
+        messagebox.showerror("Policja 🚨", f"Zostałeś złapany i pozbawiony wolności!\nGrzywna: {jail_fine} zł.\nNie możesz wykonywać akcji do końca dnia.")
         self.update_stats()
-        messagebox.showerror("Policja", f"Zostałeś złapany! Grzywna: {jail_fine} zł. Nie możesz działać do końca dnia.")
 
+    # New behavior: when an operation causes money < 0, convert negative part into debt and set money to 0
     def check_debt_post_operation(self):
         if self.money < 0:
             shortage = -self.money
             self.debt += shortage
             self.money = 0
-            self.append_log(f"Saldo < 0. Zapisano saldo=0, dodano dług: {shortage} zł.")
-            messagebox.showwarning("Dług", f"Saldo spadło poniżej 0. Zapisano jako 0 i dodano dług: {shortage} zł.")
+            messagebox.showwarning("Dług!", f"Twoje saldo spadło poniżej 0. Zapisano saldo jako 0 i dodano dług: {shortage} zł.")
+        # keep debt displayed
         self.update_stats()
 
-    # ---------------- furniture / home ----------------
+    # ----------------- furniture / home -----------------
     def craft_furniture(self):
         if self.jail:
-            messagebox.showerror("Więzienie", "Nie możesz craftować w więzieniu.")
+            messagebox.showerror("Więzienie", "Nie możesz nic zrobić będąc w więzieniu.")
             return
+
         def make(name, cost):
+            # now crafting consumes logs (wood), not standing trees
             available = sum(self.logs.values())
             if available < cost:
-                messagebox.showwarning("Brak drewna", f"Potrzebujesz {cost} drewna do wytworzenia {name}.")
+                messagebox.showwarning("Brak drewna!", f"Potrzebujesz {cost} drewna do wytworzenia mebla {name}.")
                 return False
             used = 0
+            # consume logs from inventory, arbitrary order
             for n in list(self.logs.keys()):
                 while self.logs[n] > 0 and used < cost:
                     self.logs[n] -= 1
                     used += 1
-            self.furniture_counts[name] = self.furniture_counts.get(name, 0) + 1
+            self.furniture_counts[name] = self.furniture_counts.get(name,0) + 1
             pos = self.find_free_spot()
             if pos:
                 self.home_furniture.append({"type": name, "icon": FURNITURE_TYPES[name]["icon"], "x": pos[0], "y": pos[1]})
-            self.append_log(f"Wytworzono {name} (zużyto {cost} drewna).")
+            messagebox.showinfo("Meble", f"Wytworzyłeś {name} z {cost} drewna!")
             self.update_stats()
-            messagebox.showinfo("Meble", f"Wytworzono {name}!")
             return True
-        fw = Toplevel(self.master)
-        fw.title("Tworzenie mebli")
+
+        furniture_window = Toplevel(self.master)
+        furniture_window.title("Tworzenie mebli")
+        furniture_window.configure(bg=self.bg_color)
+        tk.Label(furniture_window, text="Wybierz mebel do wytworzenia:", font=("Helvetica", 14), fg=self.text_color, bg=self.bg_color).pack(pady=8)
         for fname, info in FURNITURE_TYPES.items():
-            tk.Button(fw, text=f"{fname} ({info['cost']} drewna)", command=lambda n=fname, c=info['cost']: (make(n, c), fw.destroy()), bg=self.panel_color).pack(pady=4)
+            btn = tk.Button(furniture_window, text=f"{fname} ({info['cost']} drewna)", font=("Helvetica", 13, "bold"),
+                            bg=self.panel_color, fg=self.text_color,
+                            command=lambda n=fname, c=info['cost']: (make(n,c), furniture_window.destroy()), width=22, height=2)
+            btn.pack(pady=3)
 
     def find_free_spot(self):
         used = {(f["x"], f["y"]) for f in self.home_furniture}
@@ -652,374 +459,595 @@ class TycoonGame:
 
     def open_home(self):
         home_window = Toplevel(self.master)
-        home_window.title("Twój DOM")
-        home_window.geometry("540x420")
+        home_window.title("Twój DOM 🏠")
+        home_window.configure(bg=self.bg_color)
+        tk.Label(home_window, text="Meble w domu (przeciągaj by zmieniać pozycję):", font=("Helvetica", 15, "bold"), fg=self.text_color, bg=self.bg_color).pack(pady=8)
         canvas = Canvas(home_window, width=500, height=320, bg="#e0e0e0")
         canvas.pack()
         cell_size = 80
+
         for x in range(5):
             for y in range(4):
                 canvas.create_rectangle(x*cell_size, y*cell_size, (x+1)*cell_size, (y+1)*cell_size, outline="#bbb")
-        icon_items = []
-        for idx, furn in enumerate(self.home_furniture):
-            item = canvas.create_text(furn["x"]*cell_size+cell_size//2, furn["y"]*cell_size+cell_size//2, text=furn["icon"], font=("Arial", 42))
-            icon_items.append((item, idx))
-        control = tk.Frame(home_window)
-        control.pack()
-        def refresh_and_close():
-            home_window.destroy()
-            self.update_stats()
-        def sell_first():
-            if not self.home_furniture:
-                messagebox.showwarning("Brak", "Brak mebli.")
-                return
-            furn = self.home_furniture.pop(0)
-            self.money += getattr(self, "furniture_sell_price", 180)
-            self.append_log(f"Sprzedano mebel {furn['type']} za {getattr(self,'furniture_sell_price',180)} zł.")
-            refresh_and_close()
-        tk.Button(control, text=f"Sprzedaj pierwszy mebel ({getattr(self,'furniture_sell_price',180)}zł)", command=sell_first, bg=self.btn_color).pack(pady=4)
 
-    # ---------------- hazard mini-games (with "Zakład:" labels) ----------------
+        self.icon_items = []
+        for idx, furn in enumerate(self.home_furniture):
+            item = canvas.create_text(furn["x"]*cell_size+cell_size//2, furn["y"]*cell_size+cell_size//2,
+                                     text=furn["icon"], font=("Arial", 42))
+            self.icon_items.append((item, idx))
+
+        self.dragged = None
+        def start_drag(event):
+            for item, idx in self.icon_items:
+                coords = canvas.coords(item)
+                if abs(coords[0]-event.x)<cell_size//2 and abs(coords[1]-event.y)<cell_size//2:
+                    self.dragged = idx
+                    break
+        def drag(event):
+            if self.dragged is not None:
+                x = max(0, min(4, event.x//cell_size))
+                y = max(0, min(3, event.y//cell_size))
+                for idx, furn in enumerate(self.home_furniture):
+                    if idx != self.dragged and furn['x']==x and furn['y']==y:
+                        return
+                self.home_furniture[self.dragged]['x'] = x
+                self.home_furniture[self.dragged]['y'] = y
+                for i, (item, idx) in enumerate(self.icon_items):
+                    new_x = self.home_furniture[idx]['x']*cell_size+cell_size//2
+                    new_y = self.home_furniture[idx]['y']*cell_size+cell_size//2
+                    canvas.coords(item, new_x, new_y)
+        canvas.bind("<ButtonPress-1>", start_drag)
+        canvas.bind("<B1-Motion>", drag)
+
+        # Usuwanie mebla lub sprzedaż
+        control_frame = tk.Frame(home_window, bg=self.bg_color)
+        control_frame.pack(pady=5)
+        tk.Label(control_frame, text="Wybierz mebel:", font=("Helvetica", 12), fg=self.text_color, bg=self.bg_color).pack(side=tk.LEFT)
+        select_var = tk.StringVar(value="")
+        options = [f"{f['type']} ({f['x']},{f['y']})" for f in self.home_furniture]
+        if options:
+            select_var.set(options[0])
+        select_menu = tk.OptionMenu(control_frame, select_var, *options) if options else tk.Label(control_frame, text="Brak mebli", fg=self.text_color, bg=self.bg_color)
+        select_menu.pack(side=tk.LEFT)
+        def remove_furniture():
+            if not options:
+                return
+            idx = options.index(select_var.get())
+            del self.home_furniture[idx]
+            self.update_stats()
+            home_window.destroy()
+            self.open_home()
+        def sell_furniture():
+            if not options or select_var.get() not in options:
+                messagebox.showwarning("Sprzedaż mebla", "Nie wybrano mebla.")
+                return
+            idx = options.index(select_var.get())
+            self.money += self.furniture_sell_price
+            furn_type = self.home_furniture[idx]["type"]
+            self.furniture_counts[furn_type] = max(0, self.furniture_counts.get(furn_type,0)-1)
+            del self.home_furniture[idx]
+            self.update_stats()
+            messagebox.showinfo("Sprzedaż mebla", f"Sprzedano {furn_type} za {self.furniture_sell_price} zł!")
+            home_window.destroy()
+            self.open_home()
+        if options:
+            tk.Button(control_frame, text="Usuń", command=remove_furniture, font=("Helvetica", 12), bg=self.warn_color, fg="white").pack(side=tk.LEFT, padx=4)
+            tk.Button(control_frame, text=f"Sprzedaj ({self.furniture_sell_price} zł)", command=sell_furniture, font=("Helvetica", 12), bg=self.btn_color, fg="white").pack(side=tk.LEFT, padx=4)
+
+    # ----------------- hazard (mini-games) -----------------
     def open_hazard_menu(self):
         haz_win = Toplevel(self.master)
-        haz_win.title("Hazardowe minigry")
-        tk.Label(haz_win, text=f"Twoje pieniądze: {self.money} zł").pack(pady=6)
-        tk.Button(haz_win, text="Blackjack", command=lambda: self.open_blackjack(haz_win)).pack(pady=3)
-        tk.Button(haz_win, text="Poker (demo)", command=lambda: self.open_poker(haz_win)).pack(pady=3)
-        tk.Button(haz_win, text="Bójka o drzewo (QTE)", command=lambda: self.open_quick_time(haz_win)).pack(pady=3)
-        tk.Button(haz_win, text="Ruletka", command=lambda: self.open_roulette(haz_win)).pack(pady=3)
-        tk.Button(haz_win, text="Slots", command=lambda: self.open_slots(haz_win)).pack(pady=3)
-        tk.Button(haz_win, text="Kości", command=lambda: self.open_dice_game(haz_win)).pack(pady=3)
-        tk.Button(haz_win, text="Zgadnij liczbę", command=lambda: self.open_guess_number(haz_win)).pack(pady=3)
-        tk.Button(haz_win, text="Koło fortuny", command=lambda: self.open_wheel(haz_win)).pack(pady=3)
+        haz_win.title("Hazardowe Mini-Gry")
+        haz_win.configure(bg=self.bg_color)
+        tk.Label(haz_win, text=f"Twoje pieniądze: {self.money} zł", font=("Helvetica", 16), fg=self.text_color, bg=self.bg_color).pack(pady=10)
+        tk.Button(haz_win, text="Blackjack 🃏", font=("Helvetica", 15, "bold"),
+                  command=lambda: self.open_blackjack(haz_win), width=18, height=2, bg="#43a047", fg="white").pack(pady=5)
+        tk.Button(haz_win, text="Poker (Draw) ♠️", font=("Helvetica", 15, "bold"),
+                  command=lambda: self.open_poker(haz_win), width=18, height=2, bg="#1976d2", fg="white").pack(pady=5)
+        tk.Button(haz_win, text="Bójka o drzewo 🪓", font=("Helvetica", 15, "bold"),
+                  command=lambda: self.open_quick_time(haz_win), width=18, height=2, bg="#c62828", fg="white").pack(pady=5)
+        tk.Button(haz_win, text="Ruletka 🎯", font=("Helvetica", 15, "bold"),
+                  command=lambda: self.open_roulette(haz_win), width=18, height=2, bg="#1976d2", fg="white").pack(pady=5)
+        tk.Button(haz_win, text="Jednoręki bandyta 🎰", font=("Helvetica", 15, "bold"),
+                  command=lambda: self.open_slots(haz_win), width=18, height=2, bg="#FFD700", fg="black").pack(pady=5)
+        tk.Button(haz_win, text="Kości 🎲", font=("Helvetica", 15, "bold"),
+                  command=lambda: self.open_dice_game(haz_win), width=18, height=2, bg="#388e3c", fg="white").pack(pady=5)
+        tk.Button(haz_win, text="Zgadnij liczbę🔢", font=("Helvetica", 15, "bold"),
+                  command=lambda: self.open_guess_number(haz_win), width=18, height=2, bg="#e64a19", fg="white").pack(pady=5)
+        tk.Button(haz_win, text="Koło fortuny 🌀", font=("Helvetica", 15, "bold"),
+                  command=lambda: self.open_wheel(haz_win), width=18, height=2, bg="#5e35b1", fg="white").pack(pady=5)
 
-    # (other mini-games omitted here for brevity - they are included above in previous iterations)
-    # For full functionality all mini-game methods are present earlier (open_blackjack, open_poker, etc.)
+    # --- BLACKJACK ---
+    def open_blackjack(self, parent_win):
+        bj = Toplevel(parent_win)
+        bj.title("Blackjack")
+        bj.geometry("400x500")
+        self.bj_money = tk.IntVar(value=10)
+        self.bj_cards = []
+        self.bj_dealer = []
+        self.bj_bet = 0
+        tk.Label(bj, text="Zakład: wpisz kwotę (liczba)", font=("Helvetica", 12)).pack(pady=4)
+        self.bj_label = tk.Label(bj, text="Obstaw zakład:", font=("Helvetica", 14))
+        self.bj_label.pack()
+        self.bj_entry = tk.Entry(bj, textvariable=self.bj_money, font=("Helvetica", 14), width=7)
+        self.bj_entry.pack()
+        tk.Button(bj, text="Rozpocznij", font=("Helvetica", 13, "bold"),
+                  command=lambda: self.bj_start(bj), bg="#43a047", fg="white").pack(pady=6)
+        self.bj_status = tk.Label(bj, text="", font=("Helvetica", 12))
+        self.bj_status.pack(pady=5)
+        self.bj_buttons = {}
+        self.bj_result_label = tk.Label(bj, text="", font=("Helvetica", 13, "bold"))
+        self.bj_result_label.pack(pady=10)
 
-    # ---------------- Workers ----------------
-    def open_workers_menu(self):
-        w = Toplevel(self.master)
-        w.title("Pracownicy")
-        w.geometry("420x360")
-        tk.Label(w, text="Dostępni pracownicy do zatrudnienia:").pack()
-        listbox = tk.Listbox(w)
-        for idx, wt in enumerate(self.available_workers):
-            listbox.insert(tk.END, f"{idx+1}. {wt.name} - pensja {wt.salary} zł/dzień - daje +{wt.bonus} drewna/dzień")
-        listbox.pack(fill=tk.BOTH, expand=True)
-        def hire_selected():
-            sel = listbox.curselection()
-            if not sel:
+    def bj_start(self, bj_window):
+        try:
+            bet = int(self.bj_entry.get())
+            if bet > self.money or bet <= 0:
+                self.bj_result_label.config(text="Błąd: podaj poprawny zakład!")
                 return
-            idx = sel[0]
-            worker = self.available_workers[idx]
-            if self.money < worker.salary:
-                messagebox.showwarning("Brak pieniędzy", "Nie stać Cię na opłacenie pierwszej pensji od razu.")
-                return
-            self.money -= worker.salary
-            self.workers.append(worker)
-            self.append_log(f"Zatrudniono {worker.name}. Pensja {worker.salary} zł.")
-            self.update_stats()
-            messagebox.showinfo("Zatrudniono", f"Zatrudniono {worker.name}.")
-        tk.Button(w, text="Zatrudnij", command=hire_selected, bg=self.btn_color).pack(pady=6)
-
-        tk.Label(w, text="Aktualni pracownicy:").pack()
-        cur = tk.Listbox(w)
-        for idx, ww in enumerate(self.workers):
-            cur.insert(tk.END, f"{idx+1}. {ww.name} - pensja {ww.salary} zł/dzień - +{ww.bonus}/d")
-        cur.pack(fill=tk.BOTH, expand=True)
-        def fire_selected():
-            sel = cur.curselection()
-            if not sel:
-                return
-            idx = sel[0]
-            wname = self.workers[idx].name
-            del self.workers[idx]
-            self.append_log(f"Zwolniono {wname}.")
-            messagebox.showinfo("Zwolniono", f"Zwolniono {wname}.")
-            w.destroy()
-            self.open_workers_menu()
-        tk.Button(w, text="Zwolnij wybranego", command=fire_selected, bg=self.warn_color).pack(pady=6)
-
-    # ---------------- Market ----------------
-    def open_market(self):
-        w = Toplevel(self.master)
-        w.title("Rynek drewna")
-        w.geometry("520x420")
-        tk.Label(w, text="Aktualne ceny rynkowe:").pack()
-        text = tk.Text(w, height=6)
-        text.pack(fill=tk.X)
-        text.insert(tk.END, " | ".join([f"{k}: {v}zł" for k, v in self.market_prices.items()]))
-        text.config(state=tk.DISABLED)
-        tk.Label(w, text="Historia cen (ostatnie 10):").pack()
-        hist = tk.Text(w, height=12)
-        hist.pack(fill=tk.BOTH, expand=True)
-        for k in self.market_history:
-            recent = self.market_history[k][-10:]
-            hist.insert(tk.END, f"{k}: {recent}\n")
-        hist.config(state=tk.DISABLED)
-        def force_update():
-            self.fluctuate_market()
-            messagebox.showinfo("Rynek", "Zaktualizowano ceny rynkowe (symulacja).")
-            w.destroy()
-            self.open_market()
-        tk.Button(w, text="Zaktualizuj ceny (symulacja)", command=force_update, bg=self.btn_color).pack(pady=6)
-
-    def fluctuate_market(self):
-        for k in self.market_prices:
-            change = random.uniform(-0.12, 0.12)
-            new = max(1, int(self.market_prices[k] * (1 + change)))
-            self.market_prices[k] = new
-            self.market_history.setdefault(k, []).append(new)
-            if len(self.market_history[k]) > 100:
-                self.market_history[k] = self.market_history[k][-100:]
-
-    # ---------------- Insurance ----------------
-    def buy_insurance(self):
-        days = simpledialog.askinteger("Ubezpieczenie", "Na ile dni chcesz kupić ubezpieczenie?", minvalue=1, initialvalue=3)
-        if not days:
+        except ValueError:
+            self.bj_result_label.config(text="Błąd: podaj poprawny zakład!")
             return
-        cost = int(INSURANCE_BASE_COST * days)
-        if cost > self.money:
-            messagebox.showwarning("Brak środków", "Nie stać Cię na ubezpieczenie.")
-            return
-        self.money -= cost
-        self.insured_until_day = max(self.insured_until_day, self.day + days - 1)
-        self.append_log(f"Kupiono ubezpieczenie na {days} dni (koszt {cost} zł).")
-        messagebox.showinfo("Ubezpieczenie", f"Kupiono ubezpieczenie na {days} dni. Koszt: {cost} zł.")
+        self.bj_bet = bet
+        self.money -= bet
         self.update_stats()
+        self.bj_cards = [random.randint(2,11), random.randint(2,11)]
+        self.bj_dealer = [random.randint(2,11), random.randint(2,11)]
+        self.bj_status.config(
+            text=f"Twoje karty: {self.bj_cards} (suma: {sum(self.bj_cards)})\nKarty krupiera: [{self.bj_dealer[0]}, ?]"
+        )
+        # create buttons inside this window only
+        for b in list(self.bj_buttons.values()):
+            try: b.destroy()
+            except: pass
+        self.bj_buttons["hit"] = tk.Button(bj_window, text="Dobierz", font=("Helvetica", 13, "bold"),
+                                           command=lambda: self.bj_hit(bj_window), bg="#43a047", fg="white")
+        self.bj_buttons["hit"].pack(pady=3)
+        self.bj_buttons["stand"] = tk.Button(bj_window, text="Stój", font=("Helvetica", 13, "bold"),
+                                             command=lambda: self.bj_stand(bj_window), bg="#1976d2", fg="white")
+        self.bj_buttons["stand"].pack(pady=3)
 
-    # ---------------- Loans ----------------
-    def open_loan_window(self):
-        lw = Toplevel(self.master)
-        lw.title("Weź pożyczkę")
-        tk.Label(lw, text=f"Odsetki: {int(LOAN_INTEREST_RATE*100)}% (jednorazowo dodawane do długu)").pack()
-        tk.Label(lw, text="Kwota pożyczki (liczba):").pack()
-        amt = tk.Entry(lw)
-        amt.pack()
-        def take():
-            try:
-                a = int(amt.get())
-                if a <= 0:
-                    raise ValueError
-            except ValueError:
-                messagebox.showerror("Błąd", "Podaj poprawną kwotę.")
-                return
-            self.money += a
-            added = int(round(a * (1.0 + LOAN_INTEREST_RATE)))
-            self.debt += added
-            self.append_log(f"Zaciągnięto pożyczkę {a} zł. Do długu dodano {added} zł (principal+interest).")
-            messagebox.showinfo("Pożyczka", f"Pobrano {a} zł. Do długu dopisano {added} zł (principal+interest).")
+    def bj_hit(self, bj_window):
+        self.bj_cards.append(random.randint(2,11))
+        total = sum(self.bj_cards)
+        self.bj_status.config(
+            text=f"Twoje karty: {self.bj_cards} (suma: {total})\nKarty krupiera: [{self.bj_dealer[0]}, ?]"
+        )
+        if total > 21:
+            self.bj_result_label.config(
+                text=f"Przegrałeś! Przekroczyłeś 21.\nKarty krupiera: {self.bj_dealer} (suma: {sum(self.bj_dealer)})"
+            )
+        elif total == 21:
+            self.bj_result_label.config(
+                text=f"BLACKJACK! Wygrałeś podwójnie!\nKarty krupiera: {self.bj_dealer} (suma: {sum(self.bj_dealer)})"
+            )
+
+    def bj_stand(self, bj_window):
+        dealer_total = sum(self.bj_dealer)
+        while dealer_total < 17:
+            self.bj_dealer.append(random.randint(2,11))
+            dealer_total = sum(self.bj_dealer)
+        player_total = sum(self.bj_cards)
+        self.bj_status.config(text=f"Twoje karty: {self.bj_cards} (suma: {player_total})\nKarty krupiera: {self.bj_dealer} (suma: {dealer_total})")
+        if dealer_total > 21 or player_total > dealer_total:
+            self.bj_result_label.config(
+                text=f"Wygrałeś!\nKarty krupiera: {self.bj_dealer} (suma: {dealer_total})"
+            )
+            win_sum = self.bj_bet * 1.5
+            self.money += int(win_sum)
             self.update_stats()
-            lw.destroy()
-        tk.Button(lw, text="Weź pożyczkę", command=take, bg=self.btn_color).pack(pady=6)
+        elif player_total < dealer_total:
+            self.bj_result_label.config(
+                text=f"Przegrałeś!\nKarty krupiera: {self.bj_dealer} (suma: {dealer_total})"
+            )
+        else:
+            self.bj_result_label.config(
+                text=f"Remis!\nKarty krupiera: {self.bj_dealer} (suma: {dealer_total})"
+            )
+            self.money += self.bj_bet
+            self.update_stats()
 
-    # ---------------- Day processing (including fire & inspection) ----------------
+    # --- POKER DRAW (DEMO) ---
+    def open_poker(self, parent_win):
+        pk = Toplevel(parent_win)
+        pk.title("Poker Draw")
+        pk.geometry("400x400")
+        tk.Label(pk, text="Zakład: brak (demo) — tu można dodać stawkę", font=("Helvetica", 12)).pack(pady=4)
+        tk.Label(pk, text="Poker 5-card draw (demo)", font=("Helvetica", 15, "bold")).pack(pady=10)
+        tk.Label(pk, text="Wersja demo – pełna logika do rozbudowania!", font=("Helvetica", 12)).pack(pady=5)
+        self.poker_result_label = tk.Label(pk, text="", font=("Helvetica", 14))
+        self.poker_result_label.pack(pady=10)
+        tk.Button(pk, text="Zagraj (losuj 5 kart)", font=("Helvetica", 14, "bold"),
+                  bg="#1976d2", fg="white", command=lambda: self.poker_draw()).pack(pady=10)
+
+    def poker_draw(self):
+        deck = [f"{n}{s}" for n in list(map(str, range(2,11)))+["J","Q","K","A"] for s in ["♠", "♥", "♦", "♣"]]
+        hand = random.sample(deck, 5)
+        self.poker_result_label.config(text=f"Twoja ręka: {', '.join(hand)}")
+
+    # --- QUICK TIME EVENT: BÓJKA O DRZEWO ---
+    def open_quick_time(self, parent_win):
+        qte = Toplevel(parent_win)
+        qte.title("Bójka o drzewo")
+        qte.geometry("400x320")
+        tk.Label(qte, text="Zakład: brak (wygrana/strata losowa)", font=("Helvetica", 12)).pack(pady=4)
+        self.qte_label = tk.Label(qte, text="Kliknij odpowiednie sekwencje na czas!", font=("Helvetica", 15, "bold"))
+        self.qte_label.pack(pady=10)
+        self.qte_sequence = [random.choice(["A", "S", "D", "W"]) for _ in range(5)]
+        self.qte_entry = tk.Entry(qte, font=("Helvetica", 14))
+        self.qte_entry.pack(pady=10)
+        self.qte_result_label = tk.Label(qte, text=f"Sekwencja do wpisania: {' '.join(self.qte_sequence)}", font=("Helvetica", 13))
+        self.qte_result_label.pack(pady=4)
+        self.qte_btn = tk.Button(qte, text=f"Gotowe", font=("Helvetica", 14, "bold"),
+                                 bg="#c62828", fg="white",
+                                 command=lambda: self.qte_resolve(qte))
+        self.qte_btn.pack(pady=10)
+
+    def qte_resolve(self, qte_window):
+        user_seq = self.qte_entry.get().upper().split()
+        if user_seq == self.qte_sequence:
+            reward = random.randint(20, 70)
+            self.money += reward
+            self.update_stats()
+            self.qte_result_label.config(text=f"WYGRAŁEŚ bójkę! Sekwencja: {' '.join(self.qte_sequence)}\nZysk: {reward} zł.")
+        else:
+            loss = random.randint(10, 45)
+            self.money -= loss
+            self.check_debt_post_operation()
+            self.update_stats()
+            self.qte_result_label.config(text=f"PRZEGRAŁEŚ bójkę! Sekwencja: {' '.join(self.qte_sequence)}\nStrata: {loss} zł.")
+
+    # --- RULETKA ---
+    def open_roulette(self, parent_win):
+        ru = Toplevel(parent_win)
+        ru.title("Ruletka")
+        ru.geometry("340x360")
+        tk.Label(ru, text="Zakład: wpisz liczbę 0-36 lub kolor ('czerwony'/'czarny')", font=("Helvetica", 12)).pack(pady=4)
+        tk.Label(ru, text="Ruletka – obstaw liczbę 0-36 lub kolor", font=("Helvetica", 13)).pack(pady=8)
+        bet_entry = tk.Entry(ru, font=("Helvetica", 13))
+        bet_entry.pack()
+        tk.Label(ru, text="Stawka (zł)", font=("Helvetica", 11)).pack()
+        stake_entry = tk.Entry(ru, font=("Helvetica", 13))
+        stake_entry.pack()
+        result_label = tk.Label(ru, text="", font=("Helvetica", 14))
+        result_label.pack(pady=8)
+        def play():
+            try:
+                stake = int(stake_entry.get())
+                if stake <= 0 or stake > self.money:
+                    result_label.config(text="Błąd: podaj poprawną stawkę!")
+                    return
+            except ValueError:
+                result_label.config(text="Błąd: podaj poprawną stawkę!")
+                return
+            bet = bet_entry.get().strip().lower()
+            result = random.randint(0,36)
+            color = "czerwony" if result in [1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36] else "czarny"
+            win = 0
+            if bet == str(result):
+                win = stake*35
+            elif bet == color:
+                win = stake*2
+            self.money += win-stake
+            self.check_debt_post_operation()
+            self.update_stats()
+            result_label.config(text=f"Wypadło: {result} ({color})\nTwój zakład: {bet}\nWygrałeś: {win} zł" if win else f"Wypadło: {result} ({color})\nTwój zakład: {bet}\nPrzegrałeś {stake} zł.")
+        tk.Button(ru, text="Graj", command=play, font=("Helvetica", 13), bg="#1976d2", fg="white").pack(pady=8)
+
+    # --- SLOTS (Jednoręki bandyta) ---
+    def open_slots(self, parent_win):
+        sl = Toplevel(parent_win)
+        sl.title("Jednoręki bandyta")
+        sl.geometry("320x260")
+        tk.Label(sl, text="Zakład: wpisz stawkę (liczba)", font=("Helvetica", 12)).pack(pady=4)
+        tk.Label(sl, text="Slot Machine – obstaw stawkę", font=("Helvetica", 13)).pack(pady=8)
+        stake_entry = tk.Entry(sl, font=("Helvetica", 13))
+        stake_entry.pack()
+        result_label = tk.Label(sl, text="", font=("Helvetica", 17))
+        result_label.pack(pady=8)
+        def play():
+            try:
+                stake = int(stake_entry.get())
+                if stake <= 0 or stake > self.money:
+                    result_label.config(text="Błąd: podaj poprawną stawkę!")
+                    return
+            except ValueError:
+                result_label.config(text="Błąd: podaj poprawną stawkę!")
+                return
+            symbols = ["🍒","💎","🔔","🍋","🍀","7️⃣"]
+            roll = [random.choice(symbols) for _ in range(3)]
+            win = 0
+            if roll[0]==roll[1]==roll[2]:
+                win = stake*10
+            elif roll.count("7️⃣")==2:
+                win = stake*5
+            elif "💎" in roll:
+                win = stake*2
+            self.money += win-stake
+            self.check_debt_post_operation()
+            self.update_stats()
+            result_label.config(text=f"Symbole: {' '.join(roll)}\nWygrałeś {win} zł" if win else f"Symbole: {' '.join(roll)}\nPrzegrałeś {stake} zł.")
+        tk.Button(sl, text="Graj", command=play, font=("Helvetica", 13), bg="#FFD700", fg="black").pack(pady=8)
+
+    # --- KOŚCI ---
+    def open_dice_game(self, parent_win):
+        dice = Toplevel(parent_win)
+        dice.title("Kości")
+        dice.geometry("320x220")
+        tk.Label(dice, text="Zakład: wpisz stawkę oraz zgadnij sumę dwóch kości (2-12)", font=("Helvetica", 12)).pack(pady=4)
+        tk.Label(dice, text="Kości – obstaw sumę dwóch kości (2-12)", font=("Helvetica", 13)).pack(pady=8)
+        stake_entry = tk.Entry(dice, font=("Helvetica", 13))
+        stake_entry.pack()
+        sum_entry = tk.Entry(dice, font=("Helvetica", 13))
+        sum_entry.pack()
+        result_label = tk.Label(dice, text="", font=("Helvetica", 14))
+        result_label.pack(pady=8)
+        def play():
+            try:
+                stake = int(stake_entry.get())
+                guess = int(sum_entry.get())
+                if stake <= 0 or stake > self.money or guess<2 or guess>12:
+                    result_label.config(text="Błąd: podaj poprawne dane!")
+                    return
+            except ValueError:
+                result_label.config(text="Błąd: podaj poprawne dane!")
+                return
+            d1, d2 = random.randint(1,6), random.randint(1,6)
+            win = 0
+            if guess == d1+d2:
+                win = stake*10
+            self.money += win-stake
+            self.check_debt_post_operation()
+            self.update_stats()
+            result_label.config(text=f"Wypadło: {d1}+{d2}={d1+d2}\nTwój zakład: {guess}\nWygrałeś {win} zł" if win else f"Wypadło: {d1}+{d2}={d1+d2}\nTwój zakład: {guess}\nPrzegrałeś {stake} zł.")
+        tk.Button(dice, text="Graj", command=play, font=("Helvetica", 13), bg="#388e3c", fg="white").pack(pady=8)
+
+    # --- ZGADNIJ LICZBĘ (zmiany: 1-100, 5 prób, wskazówki większa/mniejsza) ---
+    def open_guess_number(self, parent_win):
+        gn = Toplevel(parent_win)
+        gn.title("Zgadnij liczbę")
+        gn.geometry("360x220")
+        tk.Label(gn, text="Zakład: wpisz stawkę (liczba). Zgadnij liczbę 1-100. Masz 5 prób.", font=("Helvetica", 12)).pack(pady=6)
+        stake_label = tk.Label(gn, text="Stawka (zł):", font=("Helvetica", 11))
+        stake_label.pack()
+        stake_entry = tk.Entry(gn, font=("Helvetica", 13))
+        stake_entry.pack()
+        tk.Label(gn, text="Twoje zgadnięcie (1-100):", font=("Helvetica", 11)).pack(pady=4)
+        guess_entry = tk.Entry(gn, font=("Helvetica", 13))
+        guess_entry.pack()
+        result_label = tk.Label(gn, text="", font=("Helvetica", 14))
+        result_label.pack(pady=8)
+
+        secret = random.randint(1,100)
+        attempts = {"count": 0}
+        max_attempts = 5
+
+        def play():
+            try:
+                stake = int(stake_entry.get())
+                guess = int(guess_entry.get())
+                if stake <= 0 or stake > self.money or guess < 1 or guess > 100:
+                    result_label.config(text="Błąd: podaj poprawne dane!")
+                    return
+            except ValueError:
+                result_label.config(text="Błąd: podaj poprawne dane!")
+                return
+
+            attempts["count"] += 1
+            if guess == secret:
+                win = stake * 10
+                self.money += win - stake  # reward as before (net)
+                self.check_debt_post_operation()
+                self.update_stats()
+                result_label.config(text=f"WYGRAŁEŚ! Liczba to {secret}. Wygrałeś {win} zł.")
+                return
+            else:
+                # provide hint
+                hint = "Większa" if guess < secret else "Mniejsza"
+                if attempts["count"] < max_attempts:
+                    result_label.config(text=f"Źle! {hint}. Próba {attempts['count']}/{max_attempts}.")
+                    return
+                else:
+                    # last attempt failed -> subtract stake
+                    self.money -= stake
+                    self.check_debt_post_operation()
+                    self.update_stats()
+                    result_label.config(text=f"PRZEGRAŁEŚ! Liczba to {secret}. Strata: {stake} zł.")
+                    return
+
+        tk.Button(gn, text="Zgadnij", command=play, font=("Helvetica", 13), bg="#e64a19", fg="white").pack(pady=8)
+
+    def open_wheel(self, parent_win):
+        wf = Toplevel(parent_win)
+        wf.title("Koło fortuny")
+        wf.geometry("320x200")
+        tk.Label(wf, text="Zakład: wpisz stawkę (liczba)", font=("Helvetica", 12)).pack(pady=4)
+        tk.Label(wf, text="Koło fortuny – obstaw stawkę", font=("Helvetica", 13)).pack(pady=8)
+        stake_entry = tk.Entry(wf, font=("Helvetica", 13))
+        stake_entry.pack()
+        result_label = tk.Label(wf, text="", font=("Helvetica", 14))
+        result_label.pack(pady=8)
+        def play():
+            try:
+                stake = int(stake_entry.get())
+                if stake <= 0 or stake > self.money:
+                    result_label.config(text="Błąd: podaj poprawną stawkę!")
+                    return
+            except ValueError:
+                result_label.config(text="Błąd: podaj poprawną stawkę!")
+                return
+            prizes = [0, stake*2, stake*5, stake*10, stake*20]
+            win = random.choice(prizes)
+            self.money += win-stake
+            self.check_debt_post_operation()
+            self.update_stats()
+            result_label.config(text=f"Koło zatrzymało się na {win} zł!\nWygrałeś {win} zł." if win else f"Koło zatrzymało się na 0 zł!\nPrzegrałeś {stake} zł.")
+        tk.Button(wf, text="Zakręć", command=play, font=("Helvetica", 13), bg="#5e35b1", fg="white").pack(pady=8)
+
+    # ----------------- end of day, taxes, autosave, fire chance -----------------
     def apply_property_tax(self):
         trees_count = sum(self.trees.values())
-        prop_tax_per_tree = self.compute_current_property_tax_per_tree()
-        tax_trees = prop_tax_per_tree * trees_count
-        tax_furn = self.property_tax_fluctuation + (self.base_property_tax_per_tree * 0)
+        tax_trees = self.property_tax_per_tree * trees_count
+        tax_furn = self.property_tax_per_furniture * sum(self.furniture_counts.values())
         total_tax = tax_trees + tax_furn
-        charges = []
         if total_tax <= 0:
-            return charges
+            return []
+        charges = []
         if self.money >= total_tax:
             self.money -= total_tax
             charges.append(f"Podatek od posiadanych drzew/mebli: -{total_tax} zł")
-            self.append_log(f"Pobrano podatek: {total_tax} zł.")
         else:
+            # if can't pay, set money to zero and mark debt
             charges.append(f"Nie stać Cię na podatek ({total_tax} zł). Konto idzie na 0, reszta traktowana jako dług.")
-            shortage = total_tax - max(0, self.money)
-            self.debt += shortage
+            self.debt += total_tax - max(0, self.money)
             self.money = 0
-            self.append_log(f"Nie zapłacono podatku {total_tax} zł. Dodano do długu: {shortage} zł.")
         return charges
-
-    def pay_worker_salaries(self):
-        total_salary = sum(w.salary for w in self.workers)
-        if total_salary == 0:
-            return []
-        charges = []
-        if self.money >= total_salary:
-            self.money -= total_salary
-            charges.append(f"Pensje: -{total_salary} zł")
-            self.append_log(f"Opłacono pensje: {total_salary} zł.")
-        else:
-            charges.append("Nie stać Cię na pensje. Zwalniasz wszystkich pracowników.")
-            self.append_log("Nie opłacono pensji. Zwalniani wszyscy pracownicy.")
-            self.workers = []
-        return charges
-
-    def workers_produce(self):
-        produced = {}
-        for w in self.workers:
-            species = random.choice(list(self.logs.keys()))
-            self.logs[species] += w.bonus
-            produced[species] = produced.get(species, 0) + w.bonus
-        if produced:
-            parts = [f"{k}: +{v}" for k, v in produced.items()]
-            self.append_log("Pracownicy wyprodukowali drewno: " + ", ".join(parts))
-
-    def perform_police_inspection(self):
-        total_trees = sum(self.trees.values())
-        if total_trees == 0:
-            return None
-        num = random.randint(1, min(3, total_trees))
-        confiscated = {}
-        for _ in range(num):
-            available_species = [s for s in self.trees if self.trees[s] > 0]
-            if not available_species:
-                break
-            s = random.choice(available_species)
-            self.trees[s] -= 1
-            confiscated[s] = confiscated.get(s, 0) + 1
-        parts = [f"{k}: {v}" for k, v in confiscated.items()]
-        msg = f"INSPEKCJA POLICJI! Skonfiskowano {sum(confiscated.values())} drzew: " + ", ".join(parts)
-        self.append_log(msg)
-        return msg
 
     def end_day(self):
         self.day += 1
         self.days_passed += 1
         charges = []
-
-        # electricity
+        # Opłaty za prąd
         prad = random.randint(10, 40)
         self.money -= prad
         charges.append(f"Prąd: -{prad} zł")
-        self.append_log(f"Pobrano prąd: {prad} zł")
-
-        # salaries
-        charges.extend(self.pay_worker_salaries())
-
-        # workers produce
-        self.workers_produce()
-
-        # taxes fluctuate slightly (policy changes)
-        self.tax_fluctuation = random.uniform(-0.02, 0.02)
-        self.property_tax_fluctuation = random.uniform(-0.5, 0.5)
-        self.append_log(f"Zmiana polityki podatkowej: income_tax fluct {self.tax_fluctuation:+.3f}, property_tax fluct {self.property_tax_fluctuation:+.3f}")
-
-        # property tax
-        charges.extend(self.apply_property_tax())
-
-        # tree regrowth
+        # Podatek od nieruchomości zależny od mebli i drzew
+        tax_charges = self.apply_property_tax()
+        charges.extend(tax_charges)
+        if self.jail:
+            self.jail = False
+            charges.append("Wyszedłeś z więzienia")
+        # drzewka rosną (prosty mechanizm: dostajesz 1 nowego drzewa każdego dnia każdego typu)
         for name in self.trees:
             self.trees[name] += 1
 
-        # market fluctuation
-        self.fluctuate_market()
-        self.append_log("Zmieniono ceny rynkowe (dzienna fluktuacja).")
-
-        # fire event
+        # ---- NEW: chance of random fire destroying some trees ----
         total_trees = sum(self.trees.values())
         if total_trees > 0 and random.random() < FIRE_CHANCE_PER_DAY:
+            # lose between 1 and up to 25% of total trees
             max_loss = max(1, total_trees // 4)
             total_lost = random.randint(1, max_loss)
             lost_details = {}
             for _ in range(total_lost):
+                # choose a random species that still has trees
                 available_species = [s for s in self.trees if self.trees[s] > 0]
                 if not available_species:
                     break
                 s = random.choice(available_species)
                 self.trees[s] -= 1
                 lost_details[s] = lost_details.get(s, 0) + 1
-            if self.insured_until_day >= self.day:
-                restored = {}
-                to_restore = int(sum(lost_details.values()) * INSURANCE_EFFECTIVENESS)
-                for _ in range(to_restore):
-                    possible = [s for s, c in lost_details.items() if c > 0]
-                    if not possible:
-                        break
-                    s = random.choice(possible)
-                    self.trees[s] += 1
-                    lost_details[s] -= 1
-                    restored[s] = restored.get(s, 0) + 1
-                lost_details = {k: v for k, v in lost_details.items() if v > 0}
-                parts_lost = [f"{k}: {v}" for k, v in (lost_details.items() or {})]
-                parts_restored = [f"{k}: {v}" for k, v in (restored.items() or {})]
-                msg = f"POŻAR! Straciłeś {sum(lost_details.values())} drzew."
-                if parts_lost:
-                    msg += " Straty: " + ", ".join(parts_lost) + "."
-                if restored:
-                    msg += " Ubezpieczenie przywróciło: " + ", ".join(parts_restored) + "."
-                charges.append(msg)
-                self.append_log(msg)
-            else:
-                parts = [f"{k}: {v}" for k, v in lost_details.items()]
-                msg = f"POŻAR! Straciłeś {sum(lost_details.values())} drzew: " + ", ".join(parts)
-                charges.append(msg)
-                self.append_log(msg)
+            # message about fire
+            parts = [f"{k}: {v}" for k, v in lost_details.items()]
+            charges.append(f"POŻAR! Straciłeś {sum(lost_details.values())} drzew: " + ", ".join(parts))
 
-        # police inspection event
-        if random.random() < INSPECTION_CHANCE_PER_DAY:
-            msg = self.perform_police_inspection()
-            if msg:
-                charges.append(msg)
-
-        # komornik if debt
+        # komornik (prosty mechanizm jeśli masz dług)
         if self.debt > 0:
             taken = int(self.debt * 0.1)
             if self.money >= taken:
                 self.money -= taken
                 self.debt -= taken
                 charges.append(f"Komornik pobrał: -{taken} zł")
-                self.append_log(f"Komornik pobrał {taken} zł z konta.")
             else:
                 charges.append(f"Komornik próbował pobrać {taken} zł, ale brak środków.")
+                # if cannot pay, debt increases by attempted collection (keeps compounding)
                 self.debt += taken
-                self.append_log(f"Komornik próbował {taken} zł. Dług wzrósł o {taken} zł.")
 
-        # autosave
+        # Randomize market prices for the new day
+        self.randomize_market_prices()
+
+        # autosave after day
         try:
             self.save_game()
             charges.append("Gra została zapisana.")
         except Exception:
             pass
 
-        # convert negative money to debt
+        # After all per-day operations, ensure negative money is converted into debt
         self.check_debt_post_operation()
         self.update_stats()
-        messagebox.showinfo("Koniec dnia", " | ".join(charges) if charges else "Brak opłat dziś.")
+        messagebox.showinfo("Podsumowanie dnia", " | ".join(charges) if charges else "Brak opłat dzisiaj.")
 
-    # ---------------- Taxes info UI ----------------
-    def open_taxes_info(self):
-        w = Toplevel(self.master)
-        w.title("Informacje o podatkach")
-        w.geometry("520x320")
-        tk.Label(w, text="Opis podatków w grze", font=("Helvetica", 14, "bold")).pack(pady=6)
-        income_current = self.compute_current_income_tax()
-        prop_current = self.compute_current_property_tax_per_tree()
-        desc = (
-            f"1) Podatek dochodowy przy sprzedaży (dynamiczny):\n"
-            f"   - Podstawa: {int(self.base_income_tax*100)}%\n"
-            f"   - Progresja według salda (więcej pieniędzy -> wyższe stawki)\n"
-            f"   - Fluktuacja polityczna (dzienna): {self.tax_fluctuation:+.3f}\n"
-            f"   -> Aktualna stawka: {int(income_current*100)}%\n\n"
-            f"2) Podatek od posiadanych drzew (property tax):\n"
-            f"   - Podstawa: {self.base_property_tax_per_tree} zł/drzewo/dzień\n"
-            f"   - Fluktuacja dzienna: {self.property_tax_fluctuation:+.2f}\n"
-            f"   -> Aktualna stawka: {prop_current} zł/drzewo/dzień\n\n"
-            "Uwaga: podatki mogą się zmieniać codziennie (polityka/rynek). Komunikaty o zmianach pojawiają się w historii zdarzeń."
-        )
-        tk.Label(w, text=desc, justify=tk.LEFT, wraplength=480).pack(padx=8, pady=6)
+    # ----------------- tax settings UI -----------------
+    def open_tax_settings(self):
+        t = Toplevel(self.master)
+        t.title("Ustawienia podatków")
+        t.configure(bg=self.bg_color)
+        tk.Label(t, text="Ustawienia podatków", font=("Helvetica", 14, "bold"), fg=self.text_color, bg=self.bg_color).pack(pady=8)
+        # income tax
+        frame1 = tk.Frame(t, bg=self.bg_color)
+        frame1.pack(pady=4)
+        tk.Label(frame1, text="Podatek dochodowy przy sprzedaży (%)", fg=self.text_color, bg=self.bg_color).pack(side=tk.LEFT, padx=4)
+        income_var = tk.DoubleVar(value=self.income_tax_rate*100)
+        tk.Entry(frame1, textvariable=income_var, width=6).pack(side=tk.LEFT)
+        # property tax per tree
+        frame2 = tk.Frame(t, bg=self.bg_color)
+        frame2.pack(pady=4)
+        tk.Label(frame2, text="Podatek od drzewa (zł/dzień)", fg=self.text_color, bg=self.bg_color).pack(side=tk.LEFT, padx=4)
+        prop_tree_var = tk.IntVar(value=self.property_tax_per_tree)
+        tk.Entry(frame2, textvariable=prop_tree_var, width=6).pack(side=tk.LEFT)
+        # property tax per furniture
+        frame3 = tk.Frame(t, bg=self.bg_color)
+        frame3.pack(pady=4)
+        tk.Label(frame3, text="Podatek od mebla (zł/dzień)", fg=self.text_color, bg=self.bg_color).pack(side=tk.LEFT, padx=4)
+        prop_furn_var = tk.IntVar(value=self.property_tax_per_furniture)
+        tk.Entry(frame3, textvariable=prop_furn_var, width=6).pack(side=tk.LEFT)
+        def apply_settings():
+            try:
+                it = float(income_var.get())
+                pt = int(prop_tree_var.get())
+                pf = int(prop_furn_var.get())
+                if it < 0 or it > 100 or pt < 0 or pf < 0:
+                    raise ValueError
+                self.income_tax_rate = it/100.0
+                self.property_tax_per_tree = pt
+                self.property_tax_per_furniture = pf
+                messagebox.showinfo("Ustawienia", "Zastosowano ustawienia podatków.")
+                t.destroy()
+                self.update_stats()
+            except Exception:
+                messagebox.showerror("Błąd", "Wprowadź poprawne wartości.")
+        tk.Button(t, text="Zapisz", command=apply_settings, bg=self.btn_color).pack(pady=8)
 
-    # ---------------- on_closing handler (FIX) ----------------
+    # ----------------- loan UI & handling -----------------
+    def open_loan_window(self):
+        lw = Toplevel(self.master)
+        lw.title("Weź pożyczkę")
+        lw.configure(bg=self.bg_color)
+        tk.Label(lw, text="Podaj kwotę pożyczki (zł):", font=("Helvetica", 13), fg=self.text_color, bg=self.bg_color).pack(pady=8)
+        amt_var = tk.StringVar(value="100")
+        entry = tk.Entry(lw, textvariable=amt_var, font=("Helvetica", 13))
+        entry.pack(pady=4)
+        info = tk.Label(lw, text=f"Odsetki: {int(LOAN_INTEREST_RATE*100)}% od pożyczonej kwoty (doliczane do długu)", fg=self.text_color, bg=self.bg_color)
+        info.pack(pady=4)
+        def take():
+            try:
+                amt = int(amt_var.get())
+                if amt <= 0:
+                    raise ValueError
+            except ValueError:
+                messagebox.showerror("Błąd", "Podaj poprawną kwotę (liczba całkowita).")
+                return
+            # grant money and add interest to debt
+            self.money += amt
+            added_debt = int(round(amt * (1.0 + LOAN_INTEREST_RATE)))
+            # You requested that interest is 23% of the borrowed amount — here we add principal+interest to debt
+            self.debt += added_debt
+            messagebox.showinfo("Pożyczka", f"Pożyczono {amt} zł.\nDo długu dopisano kwotę: {added_debt} zł (principal + {int(LOAN_INTEREST_RATE*100)}% odsetek).")
+            self.update_stats()
+            lw.destroy()
+        tk.Button(lw, text="Weź pożyczkę", command=take, bg="#aa8844").pack(pady=8)
+
+    # ----------------- save on close -----------------
     def on_closing(self):
-        # Ask user if they want to save before exit. Use modal dialog to avoid accidental close.
-        if self.ask_modal_yes_no("Wyjście", "Chcesz zapisać przed wyjściem?"):
+        if messagebox.askyesno("Zapis", "Chcesz zapisać przed wyjściem?"):
             try:
                 self.save_game()
             except Exception:
                 pass
-        # Finally destroy the main window
-        try:
-            self.master.destroy()
-        except Exception:
-            pass
+        self.master.destroy()
 
-# ---------------- Run ----------------
+# ----------------- run -----------------
 if __name__ == "__main__":
     root = tk.Tk()
-    app = TycoonGame(root)
+    game = TycoonGame(root)
     root.mainloop()
